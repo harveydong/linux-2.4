@@ -386,6 +386,9 @@ static int exec_mmap(void)
 {
 	struct mm_struct * mm, * old_mm;
 
+//同样,子进程的用户空间可能是父进程用户空间的复制品.也可能只是通过一个指针来共享父进程的用户空间.这一点只要检查一下对用户空间,也就是current->mm的共享计数就知道了.
+//当共享计数为１时，表明对此空间的使用是独占的,也就是说这是从父进程复制过来的.那就要先释放mm_struct数据结构以下的所有vm_area_struct数据结构(但是不包括mm_struct结构本身)
+//并且将页面表中的表项都设置为０.
 	old_mm = current->mm;
 	if (old_mm && atomic_read(&old_mm->mm_users) == 1) {
 		flush_cache_mm(old_mm);
@@ -529,6 +532,10 @@ int flush_old_exec(struct linux_binprm * bprm)
 	/*
 	 * Make sure we have a private signal table
 	 */
+//首先是进程的信号(软中断)处理表. 一个进程的信号处理表就好像一个系统中的中断向量表.
+//当子进程被创建出来时,父进程的信号处理表可能已经复制过来了,但也可能只是把父进程的信号处理表指针复制了过来.而通过这指针来共享父进程的信号处理表.
+
+//现在,子进程最终要”自立门户”了,所以要看一下如果还在共享父进程的信号处理表的话,就要把它复制过来.正因为这样,make_private_signals的代码与do_fork中调用的copy_sighand基本相同.
 	oldsig = current->sig;
 	retval = make_private_signals();
 	if (retval) goto flush_failed;
@@ -536,6 +543,7 @@ int flush_old_exec(struct linux_binprm * bprm)
 	/* 
 	 * Release all of the old mmap stuff
 	 */
+//这里很关键了,从父进程继承下来的用户空间就是在这里放弃的.
 	retval = exec_mmap();
 	if (retval) goto mmap_failed;
 
@@ -597,10 +605,14 @@ static inline int must_not_trace_exec(struct task_struct * p)
  * Fill the binprm structure from the inode. 
  * Check permissions, then read the first 128 (BINPRM_BUF_SIZE) bytes
  */
+//读128B到bprm的缓冲区
 int prepare_binprm(struct linux_binprm *bprm)
 {
 	int mode;
 	struct inode * inode = bprm->file->f_dentry->d_inode;
+
+//在读之前要先检查当前进程是否有这个权利,以及该文件是否有可执行属性.
+//如果可执行文件具有"set uid"特性,则要做相应的设置.
 
 	mode = inode->i_mode;
 	/* Huh? We had already checked for MAY_EXEC, WTF do we check this? */
@@ -747,6 +759,12 @@ inside:
 /*
  * cycle the list of binary formats handler, until one recognizes the image
  */
+//先来介绍一个大概
+//在内核中有一个队列，叫做formats,挂在此队列中的成员是代表着各种可执行文件格式的"代理人".
+//每个成员只认识并且处理一种特定格式的可执行文件的运行.
+//那么现在就有formats队列中的成员来逐个认领.
+//要是都不认识呢？那就呀根据文件头部信息再找找看,是否有为此种格式设计,仍是作为可动态安装模块实现的“代理人"存在于文件系统中.
+//如果有的话,就把这模块安装进来并且将其挂入到formats队列中.然后让formats队列中的各个”代理人“再来认一次.
 int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 {
 	int try,retval=0;
@@ -785,6 +803,12 @@ int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 #endif
 	for (try=0; try<2; try++) {
 		read_lock(&binfmt_lock);
+//内层的for循环就是对formats队列中的每个成员循环,让队列中的成员逐个试试他们的load_binary函数,看看是否能对上号,如果对上号,那就把目标文件装入并将其投入运行,再返回一个正数或者０.
+//当cpu从系统调用退回时,该目标文件的执行就真正开始了.
+//否则,如果不能辨识,或者在处理的过程中出了错,就返回一个负数. 
+
+//出错代码-ENOEXEC表示只是对不上号,而并没有发生其他错误,所以循环回去,让队列中的下一个成员再来试试.
+//但是如果出了错而又不是-ENOEXEC,那就表示对上号了,但是出了其他的错,这就不用再让其他的成员来试了.
 		for (fmt = formats ; fmt ; fmt = fmt->next) {
 			int (*fn)(struct linux_binprm *, struct pt_regs *) = fmt->load_binary;
 			if (!fn)
@@ -811,6 +835,9 @@ int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 				return retval;
 			}
 		}
+//内层循环结束后，如果失败的原因是-ENOEXEC，就说明队列中的所有成员都不认识目标文件的格式.
+//这时候,如果内核支持动态安装模块,就根据目标文件的第２和第３字节生成一个binfmt模块名,通过request_module试着将相应的模块装入.
+//外层的for循环共进行两次,正是为了在安装模块以后再来试一次.
 		read_unlock(&binfmt_lock);
 		if (retval != -ENOEXEC) {
 			break;
@@ -842,21 +869,40 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 	int retval;
 	int i;
 
+//这里的file代表着读入可执行文件的上下文.
 	file = open_exec(filename);
 
 	retval = PTR_ERR(file);
 	if (IS_ERR(file))
 		return retval;
 
+//目标文件打开后,下一步就要从文件中装入可执行程序了.
+//内核中为可执行程序的装入定义了一个数据结构linux_binprm,以便将运行一个可执行文件时所需的信息组织在一起.
+
+
+//每个参数的最大长度也定义为一个物理页面,所以bprm中有一个页面指针数组,数组的大小为允许的最大参数个数MAX_ARG_PAGES,目前这个常数定义为32.
+//现在将bprm.p设置成这些页面的总和减去一个指针大小.因为第0个参数也就是argv[0]是可执行程序本身的路径名.
 	bprm.p = PAGE_SIZE*MAX_ARG_PAGES-sizeof(void *);
+
+//通过memset将这个指针数组初始化成全0.
 	memset(bprm.page, 0, MAX_ARG_PAGES*sizeof(bprm.page[0])); 
 
 	bprm.file = file;
 	bprm.filename = filename;
+
+//sh.bang的值说明可执行文件的性质,当可执行文件是一个shell过程,即shell脚本时,置1.而现在还不知道，所以暂且将其置为0,也就是先假定为二进制文件.
 	bprm.sh_bang = 0;
 	bprm.loader = 0;
 	bprm.exec = 0;
+
+//开始处理可执行文件的参数和环境变量
+
+//注意这里的数组argv[]和envp[]是在用户空间而不在内核空间,所以计数的操作并不那么简单.
+//count对字符串指针数组argv[]中的参数个数进行计数.而bprm.p/sizeof(void*)表示允许的最大值.
 	if ((bprm.argc = count(argv, bprm.p / sizeof(void *))) < 0) {
+
+//这里如果count失败,对目标文件执行一次allow_write_access操作,这个函数是与deny_write_access配对使用的,目的在于防止其他进程在读入可执行文件期间通过内存映射改变它的内容. deny_write_access是在
+//打开可执行文件时在open_exec中调用的.
 		allow_write_access(file);
 		fput(file);
 		return bprm.argc;
@@ -867,10 +913,16 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 		fput(file);
 		return bprm.envc;
 	}
-
+//完成统计之后,进一步对数据结构bprm做准备,从可执行文件中读入开头的128B到linux_binprm的bprm中的缓冲区中.
 	retval = prepare_binprm(&bprm);
 	if (retval < 0) 
 		goto out; 
+
+
+//最后的准备工作就是把执行的参数,也就是argv[]以及运行的环境,也就是envp[],从用户空间拷贝到数据结构bprm中.
+//其中第一个参数argv[0]就是可执行文件的路径名.已经在bprm.filename中了.所以用copy_strings_kernel从内核空间中拷贝.
+//其他的就要用copy_strings从用户空间拷贝.
+
 
 	retval = copy_strings_kernel(1, &bprm.filename, &bprm);
 	if (retval < 0) 
@@ -885,6 +937,8 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 	if (retval < 0) 
 		goto out; 
 
+
+//所有的准备工作都已经做完了,所有必要的信息都已经收集到了linux_binprm中了,接着下来就要装入并运行目标程序了
 	retval = search_binary_handler(&bprm,regs);
 	if (retval >= 0)
 		/* execve success */

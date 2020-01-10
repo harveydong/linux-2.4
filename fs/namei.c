@@ -109,13 +109,14 @@ static inline int do_getname(const char *filename, char *page)
 {
 	int retval;
 	unsigned long len = PATH_MAX + 1;
-
+//如果指针filename的值大于TASK_SIZE,就表示filename实际上是在系统空间中.
 	if ((unsigned long) filename >= TASK_SIZE) {
 		if (!segment_eq(get_fs(), KERNEL_DS))
 			return -EFAULT;
 	} else if (TASK_SIZE - (unsigned long) filename < PAGE_SIZE)
 		len = TASK_SIZE - (unsigned long) filename;
 
+//这个是arch/i386/lib/usercopy.c中
 	retval = strncpy_from_user((char *)page, filename, len);
 	if (retval > 0) {
 		if (retval < len)
@@ -131,6 +132,10 @@ char * getname(const char * filename)
 	char *tmp, *result;
 
 	result = ERR_PTR(-ENOMEM);
+//这里为什么要分配一个物理页面来作为缓冲区？原因有:
+//1.首先这个字符串可能很长,因为这是一个绝对路径名.
+//2.其次进程系统空间堆栈大小大约是7KB，不能滥用,不宜在getname中定义一个局部的4KB的字符数组.
+	
 	tmp = __getname();
 	if (tmp)  {
 		int retval = do_getname(filename, tmp);

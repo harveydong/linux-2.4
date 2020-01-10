@@ -35,6 +35,9 @@ static int aout_core_dump(long signr, struct pt_regs * regs, struct file *file);
 
 extern void dump_thread(struct pt_regs *, struct user *);
 
+//a.out格式的linux_binfmt数据结构
+//装载和投入运行a.out格式目标文件的函数为load_aout_binary
+
 static struct linux_binfmt aout_format = {
 	NULL, THIS_MODULE, load_aout_binary, load_aout_library, aout_core_dump, PAGE_SIZE
 };
@@ -251,6 +254,20 @@ static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
  * libraries.  There is no binary dependent code anywhere else.
  */
 
+
+/*
+struct exec {
+	unsigned long a_info;//这个分为两个部分,其高１６位是一个代表目标CPU类型的代码.对于i386cpu这部分的值为100(0x64);低16位就是magic number. 不过a.out文件的magic number并不像在有的格式中那样是可打印字符,而是表示某些属性的编码,一共4种,即ZMAGIC, OMAGIC, QMAGIC, NMAGIC.
+	unsigned a_text;
+	unsigned a_data;
+	unsigned a_bss;
+	unsigned a_syms;
+	unsigned a_entry;
+	unsigned a_trsize;
+	unsigned a_drsize;
+}
+
+*/
 static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
 	struct exec ex;
@@ -258,7 +275,8 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	unsigned long fd_offset;
 	unsigned long rlim;
 	int retval;
-
+//首先检查目标文件的格式,看看是否对上号.
+//所有a.out格式可执行文件(二进制代码)的开头都应该是一个exec数据结构.在include/asm-i386/a.out.h定义的
 	ex = *((struct exec *) bprm->buf);		/* exec-header */
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != OMAGIC &&
 	     N_MAGIC(ex) != QMAGIC && N_MAGIC(ex) != NMAGIC) ||
@@ -276,10 +294,17 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	rlim = current->rlim[RLIMIT_DATA].rlim_cur;
 	if (rlim >= RLIM_INFINITY)
 		rlim = ~0;
+
+//目标文件所确定的data和bss两个”段“的总和不能超过进程的DATA资源限制
 	if (ex.a_data + ex.a_bss > rlim)
 		return -ENOMEM;
 
+
+//顺利通过了检验后就表示具备了执行该目标文件的条件.所以就到了”与过去告别“的时候.
+//这种”告别过去“意味着放弃从父进程”继承“下来的全部用户空间.
+//不管是通过复制还是通过共享继承下来的.
 	/* Flush all traces of the currently running executable */
+//在fs/exec.c中
 	retval = flush_old_exec(bprm);
 	if (retval)
 		return retval;
