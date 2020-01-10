@@ -43,6 +43,7 @@ typedef void (*lcall7_func)(int, struct pt_regs *);
 struct exec_domain {
 	const char *name;
 	lcall7_func handler;
+//pers_low为某种域的代码,有PER_LINUX, PER_SVR4, PER_BSD等.
 	unsigned char pers_low, pers_high;
 	unsigned long * signal_map;
 	unsigned long * signal_invmap;

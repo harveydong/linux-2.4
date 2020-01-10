@@ -149,6 +149,9 @@ void clear_page_tables(struct mm_struct *mm, unsigned long first, int nr)
  * 08Jan98 Merged into one routine from several inline routines to reduce
  *         variable count and make things faster. -jj
  */
+//这个函数逐层处理页面目录项和页面表项.
+//copy_page_range实际上连一个物理页面也没有真正地”复制“。
+
 int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
 			struct vm_area_struct *vma)
 {
@@ -159,7 +162,8 @@ int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
 
 	src_pgd = pgd_offset(src, address)-1;
 	dst_pgd = pgd_offset(dst, address)-1;
-	
+
+//这个for循环是对页面目录项的循环.	
 	for (;;) {
 		pmd_t * src_pmd, * dst_pmd;
 
@@ -185,6 +189,7 @@ skip_copy_pmd_range:	address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		src_pmd = pmd_offset(src_pgd, address);
 		dst_pmd = pmd_offset(dst_pgd, address);
 
+//这个do循环是对中间目录项的循环.
 		do {
 			pte_t * src_pte, * dst_pte;
 		
@@ -207,7 +212,27 @@ skip_copy_pte_range:		address = (address + PMD_SIZE) & PMD_MASK;
 			
 			src_pte = pte_offset(src_pmd, address);
 			dst_pte = pte_offset(dst_pmd, address);
-			
+
+//这个do循环是对页面表项的循环.			
+//循环中检查父进程一个页面表中的每个表项.根据表项的内容决定具体的操作.而表项的内容,则无非是下面这么一些可能.
+//(1).表项的内容为全0,所以pte_none()返回1,说明该页面的映射尚未建立，或者说是个“空洞”，因此不需要做任何事.
+//(2).表项的最低位,即_PAGE_PRESENT标志位为0,所以pte_present()返回1.说明映射已经建立,但是该页面目前不在内存中,已经被调出到交换设备上.此时表项的内容指明
+//"盘上页面"的地点.而现在该盘上页面多了一个"用户",所以要通过swap_duplicate()递增它的共享计数.然后就转到cont_copy_pte_range将次表项复制到子进程的页面表中.
+//(3).映射已建立,但是物理页面不是一个有效的内存页面,所以VALID_PAGE()返回0. 这个情况就是: 有些物理页面在外设接口卡上,相应的地址称为"总线地址",而并不是内存页面.
+//这样的页面、以及虽是内存页面但是由内核保留的页面,是不属于页面换入\换出机制管辖的,实际上也不消耗动态分配的内存页面.所以页转到cont_copy_pte_range将此表项复制到
+//子进程的页面表中.
+
+//(4).需要从父进程复制的可写页面.本来,此时应该分配一个空闲的内存页面,再从父进程的页面把内容复制过来.并为之建立映射.但是这个操作的代价是不小的.
+//linux内核采用了一种称为"copy on write"的技术,先通过复制页面表项暂时共享这个页面,到子进程(或父进程)真的要写这个页面时再次分配页面和复制.
+//变量cow是一个局部变量. 只要一个虚存区间的性质是可写(VM_MAYWRITE为1))而又不是共享(VM_SHARED为0),就属于copy on write区间.
+//实际上,对于绝大多数的可写虚存区间,cow都是1.
+//在通过复制页面表项暂时共享一个页面时,需要做两件重要的事.(a)将父进程的页面表项改成写保护.(b)把已经改成写保护的表项设置到子进程的页面表项中.
+//这样,相应的页面在两个进程中都变成了”只读“了. 当不管是父进程或是子进程企图写入该页面时,都会引起一次页面异常.而该异常处理程序对此的反应则是另行分配一个物理页面.
+//并把内容真正地"复制"到新的物理页面中. 让父、子进程各自拥有自己的物理页面. 然后将两个页面表中相应的表项改成可写.
+
+
+//(5).父进程的只读页面.这种页面本来就不需要复制.因而可以复制页面表项来共享物理页面.
+
 			do {
 				pte_t pte = *src_pte;
 				struct page *ptepage;

@@ -273,19 +273,33 @@ struct user_struct {
 
 extern struct user_struct root_user;
 #define INIT_USER (&root_user)
+/*
+该结构大体可以分为状态、性质、资源和组织等几大类.
+
+
+
+
+*/
 
 struct task_struct {
 	/*
 	 * offsets of these are hardcoded elsewhere - touch with care
 	 */
+//state表示进程当前的运行状态.
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
+
+//flags也是反映进程状态的信息，但不是运行状态,而是与管理有关的其他信息
 	unsigned long flags;	/* per process flags, defined below */
+
+//表示进程收到了“信号”但尚未处理.
 	int sigpending;
 	mm_segment_t addr_limit;	/* thread address space:
 					 	0-0xBFFFFFFF for user-thead
 						0-0xFFFFFFFF for kernel-thread
 					 */
 	struct exec_domain *exec_domain;
+
+//与调度有关,表示CPU从系统空间返回用户空间前夕要进行一次调度
 	volatile long need_resched;
 	unsigned long ptrace;
 
@@ -306,9 +320,13 @@ struct task_struct {
 	 * (only the 'next' pointer fits into the cacheline, but
 	 * that's just fine.)
 	 */
+//当进程处于TASK_RUNNING状态时,内核就通过run_list，将其挂入一个"运行队列".
 	struct list_head run_list;
 	unsigned long sleep_time;
 
+//就是当内核需要对每一个进程做点什么事情时，还需要将系统中所有的进程都组织成一个线性的队列.这样就可以通过一个简单的for或者while循环遍历所有的task_struct结构.
+//所以需要这么一个线性队列.系统中的第一个建立的进程就是init_task,这个进程是所有进程的总根.所以这个线性队列就是以init_task为起点.后续每创建一个进程就通过其
+//tast_struct结构中的next_task, 和prev_task两个指针链入这个线性队列中.
 	struct task_struct *next_task, *prev_task;
 	struct mm_struct *active_mm;
 
@@ -332,10 +350,16 @@ struct task_struct {
 	 * older sibling, respectively.  (p->father can be replaced with 
 	 * p->p_pptr->pid)
 	 */
+//p_opptr指向父进程, p_pptr指向父进程.
+//p_cptr指向最“年轻”的子进程.
+//p_ysptr指向"弟弟"
+//p_osptr指向“哥哥"
+
 	struct task_struct *p_opptr, *p_pptr, *p_cptr, *p_ysptr, *p_osptr;
 	struct list_head thread_group;
 
 	/* PID hash table linkage. */
+//在for.c中，定义一个struct task_struct *pidhash[1024]这个hash表，主要是为了方便通过pid找到struct task_struct.
 	struct task_struct *pidhash_next;
 	struct task_struct **pidhash_pprev;
 
@@ -356,10 +380,14 @@ struct task_struct {
 	gid_t gid,egid,sgid,fsgid;
 	int ngroups;
 	gid_t	groups[NGROUPS];
+//一般进程都不能"为所欲为",而是各自被赋予了各种不同的权限.例如,一个进程是否有重新引导操作系统,则取决于该进程是否有CAP_SYS_BOOT授权.
 	kernel_cap_t   cap_effective, cap_inheritable, cap_permitted;
 	int keep_capabilities:1;
+
+//该数据结构代表着进程所属的用户.
 	struct user_struct *user;
 /* limits */
+//这是一个结构数组,表明进程对各种资源的使用数量所受的限制.
 	struct rlimit rlim[RLIM_NLIMITS];
 	unsigned short used_math;
 	char comm[16];

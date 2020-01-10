@@ -436,13 +436,19 @@ void release_segments(struct mm_struct *mm)
 /*
  * Create a kernel thread
  */
+//这个是linux内核中貌似“一揽子"创建内核线程的函数(常常称为“原语").但是,实际上这只是对clone()的包装,它并不能像调用execve()时那样执行一个
+//可执行文件,而只是执行内核中的某一个函数.
+
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	long retval, d0;
 
 	__asm__ __volatile__(
 		"movl %%esp,%%esi\n\t"
+//这里执行系统调用,说明在内核空间,是可以执行系统调用的.
+//这里传入的系统调用号是ax=__NR_clone.
 		"int $0x80\n\t"		/* Linux/i386 system call */
+//这里从clone返回后,采用了一种不同的方法来区分父进程与子进程,就是将返回时的堆栈指针与保存在寄存器ESI中的父进程的堆栈指针进行比较.
 		"cmpl %%esp,%%esi\n\t"	/* child or parent? */
 		"je 1f\n\t"		/* parent - jump */
 		/* Load the argument into eax, and push it.  That way, it does
@@ -450,7 +456,11 @@ int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 		 * -mregparm or not.  */
 		"movl %4,%%eax\n\t"
 		"pushl %%eax\n\t"		
-		"call *%5\n\t"		/* call fn */
+//内核线程不能像进程一样执行一个可执行映象文件,而只能执行内核中的一个函数.这里call指令就是对这个函数的调用.
+//内核线程和进程在执行目标程序的方式上的这种不同,又引发出另一个重要的不同.那就是进程在调用execve()之后不再返回,而是”客死他乡“,在所执行的程序中去世.
+
+//可是内核线程只不过是调用一个目标函数,当然要从那个函数返回. 所以下面又调动int 中断
+        "call *%5\n\t"		/* call fn */
 		"movl %3,%0\n\t"	/* exit */
 		"int $0x80\n"
 		"1:\t"
@@ -526,6 +536,10 @@ void copy_segments(struct task_struct *p, struct mm_struct *new_mm)
 #define savesegment(seg,value) \
 	asm volatile("movl %%" #seg ",%0":"=m" (*(int *)&(value)))
 
+
+//实际上却只是复制父进程的系统空间堆栈. 堆栈中的内容说明了父进程从通过系统调用进入系统空间开始到进入copy_thread的来历.子进程将要循相同的路线返回,所以
+//要把它复制给子进程.
+//但是如果子进程的系统空间堆栈与父进程的完全相同,那返回后就无法区分谁是子进程了.所以复制以后还要略作调整.
 int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	unsigned long unused,
 	struct task_struct * p, struct pt_regs * regs)
@@ -534,9 +548,13 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 
 	childregs = ((struct pt_regs *) (THREAD_SIZE + (unsigned long) p)) - 1;
 	struct_cpy(childregs, regs);
+
+//开始调整. 先把eax设置为0,当子进程受调度而”恢复"运行,从系统调用"返回"时,这就是返回值. 因为子进程的返回值是0.
 	childregs->eax = 0;
+//设置子进程在用户空间的堆栈位置.对于fork和vfork而言,还是指向父进程原来在用户空间的堆栈.而对于clone,这个是由调用者给定的.
 	childregs->esp = esp;
 
+//数据结构thread_struct,里面记录着进程在切换时的(系统空间)堆栈指针,取指令地址(也就是"返回地址")等关键性的信息.
 	p->thread.esp = (unsigned long) childregs;
 	p->thread.esp0 = (unsigned long) (childregs+1);
 
@@ -692,13 +710,20 @@ asmlinkage int sys_fork(struct pt_regs regs)
 	return do_fork(SIGCHLD, regs.esp, &regs, 0);
 }
 
+
+//int clone(int (*fn)(void *arg), void *child_stack, int flags, void *arg);
+//clone系统调用的主要用途是创建一个线程，这个线程可以是内核线程，也可以用户线程。
+//创建用户空间线程时,可以给定子线程用户空间堆栈的位置.还可以指定子进程运行的起点.
+
+
+//clone,取决于调用时指定的clone_flags参数.
 asmlinkage int sys_clone(struct pt_regs regs)
 {
 	unsigned long clone_flags;
 	unsigned long newsp;
 
-	clone_flags = regs.ebx;
-	newsp = regs.ecx;
+	clone_flags = regs.ebx;//这里就是flags
+	newsp = regs.ecx; //这里ecx就是child_stack,
 	if (!newsp)
 		newsp = regs.esp;
 	return do_fork(clone_flags, newsp, &regs, 0);
@@ -714,6 +739,11 @@ asmlinkage int sys_clone(struct pt_regs regs)
  * do not have enough call-clobbered registers to hold all
  * the information you need.
  */
+
+
+//这里设置了CLONE_VM. 则在copy_mm()中，只是通过指针共享其父进程的mm_struct，并没有一份自己的副本.这也就是说,经vfrk()复制的是个线程,只能靠共享其父进程的存储空间
+//度日,包括用户空间堆栈在内.
+
 asmlinkage int sys_vfork(struct pt_regs regs)
 {
 	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.esp, &regs, 0);
