@@ -302,6 +302,8 @@ static inline void __exit_mm(struct task_struct * tsk)
 {
 	struct mm_struct * mm = tsk->mm;
 
+//在fork和execve中看到,当do_fork时标志位CLONE_VFORK为1时,父进程在睡眠,等待子进程在一个信号量上执行一次up操作以后才能回到用户空间运行.
+//而子进程必须在释放其用户存储空间时执行这个操作,所以这里调用mm_release.
 	mm_release();
 	if (mm) {
 		atomic_inc(&mm->mm_count);
@@ -311,6 +313,7 @@ static inline void __exit_mm(struct task_struct * tsk)
 		tsk->mm = NULL;
 		task_unlock(tsk);
 		enter_lazy_tlb(mm, current, smp_processor_id());
+//实际的存储空间释放是调用mmput完成的.
 		mmput(mm);
 	}
 }
@@ -328,6 +331,12 @@ static void exit_notify(void)
 {
 	struct task_struct * p, *t;
 
+//就像人一样,所谓父进程也有"生父"和"养父"之分.
+//在task_struct结构中有个指针p_opptr指向其"original parent",就是生父.
+//另外还有个指针p_pptr则指向其养父.
+//一个进程在创建之初其生父和养父是一致的,所以两个指针指向同一个父进程.
+//但是,在运行中p_pptr可以暂时地改变.这种改变发生在一个进程通过系统调用ptrace来跟踪另一个进程的时候,这时候被跟踪进程的p_pptr指针被设置成指向正在跟踪它的进程.
+//那个进程就暂时成了被跟踪进程的"养父".
 	forget_original_parent(current);
 	/*
 	 * Check to see if any process groups have become orphaned
@@ -382,6 +391,9 @@ static void exit_notify(void)
 	 */
 
 	write_lock_irq(&tasklist_lock);
+//当前进程的状态设置成TASK_ZOMBLE,表示进程的生命已经结束,从此不再接受调度.
+//但是当前进程的残骸仍旧占着最低限度的资源.包括其task_struct数据结构和系统空间堆栈所在的连个页面.
+
 	current->state = TASK_ZOMBIE;
 	do_notify_parent(current, current->exit_signal);
 	while (current->p_cptr != NULL) {
@@ -418,26 +430,42 @@ static void exit_notify(void)
 	write_unlock_irq(&tasklist_lock);
 }
 
+
+//这里NORET_TYPE是在include/linux/kernle.h中定义为/**/,就是一个提醒作用.
+//cpu在进入do_exit以后,当前进程就在中途寿终正寝,不会从这个函数返回.
 NORET_TYPE void do_exit(long code)
 {
 	struct task_struct *tsk = current;
 
+//所谓exit，只有进程(或线程)才谈得上,中断服务程序根本就不应该调用do_exit.
+//在include/asm-i386/hardirq.h中
 	if (in_interrupt())
 		panic("Aiee, killing interrupt handler!");
+
+//只要不是在中断上下文,就一定是在某个进程(或线程)的上下文中.
+//但是,0号进程和1号进程,也就是"空转(idle)进程和“初始化(init)进程",是不允许退出的.所以接着要对当前进程的pid加以检查
 	if (!tsk->pid)
 		panic("Attempted to kill the idle task!");
 	if (tsk->pid == 1)
 		panic("Attempted to kill init!");
 	tsk->flags |= PF_EXITING;
+
+//进程在决定退出之前可能已经设置了实时定时器,也就是将其tast_struct中的成员real_timer挂入了内核中的定时器队列.
+//现在进程即将退出系统,一来是这个定时器已经没有了存在的必要;二来进程的task_struct结构行将撤销,所以要将当前进程从定时器队列中脱离出来.
 	del_timer_sync(&tsk->real_timer);
 
 fake_volatile:
 #ifdef CONFIG_BSD_PROCESS_ACCT
 	acct_process(code);
 #endif
+
+//可想而知,进程在结束生命退出系统之前要释放其所有的资源.包括有存储空间、已打开的文件、工作目录、信号处理表等等.
+//但是,还有一种资源是不”继承“的,所以在do_fork中不会看到,那就是进程在用户空间建立和使用的”信号量“. 如果在调用exit之前还有信号量尚未撤销,那就也要
+//把它撤销.
 	__exit_mm(tsk);
 
 	lock_kernel();
+//在ipc/sem.c中
 	sem_exit();
 	__exit_files(tsk);
 	__exit_fs(tsk);
@@ -452,6 +480,14 @@ fake_volatile:
 		__MOD_DEC_USE_COUNT(tsk->binfmt->module);
 
 	tsk->exit_code = code;
+
+//调用该函数通知父进程,让父进程料理后事
+//这样安排的原因有两个:
+//1.首先在子进程的task_struct数据结构中还有不少有用的统计信息,让父进程来料理后事可以将这些统计信息并入父进程的统计信息中而不会使这些信息丢失.
+//2.也许更重要的是,系统一旦进入多进程状态以后,任何一刻都需要有个"当前进程”存在.
+//在中断和异常处理程序中都要用到当前进程的内核空间堆栈.如果进程在系统调度另一个进程投入运行之前就把它的task_struct结构和内核空间堆栈释放,那就会造成一个空隙.
+//如果恰好有一次中断或者异常在此空隙中发生就会造成问题.所以子进程的task_struct和内核空间堆栈必须要保存到另一个进程开始运行之后才能释放.这样让父进程来料理后事
+//就是一个合理的安排了.
 	exit_notify();
 	schedule();
 	BUG();

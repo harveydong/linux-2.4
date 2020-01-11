@@ -871,6 +871,8 @@ void build_mmap_avl(struct mm_struct * mm)
 }
 
 /* Release all mmaps. */
+//该函数释放mm_struct下面的所有vm_area_struct数据结构,并且将页面表中与用户空间相对应的表项都设置成0.使整个"用户空间"成为一个"空壳".
+
 void exit_mmap(struct mm_struct * mm)
 {
 	struct vm_area_struct * mpnt;

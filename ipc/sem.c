@@ -985,6 +985,8 @@ void sem_exit (void)
 	/* If the current process was sleeping for a semaphore,
 	 * remove it from the queue.
 	 */
+//如果当前进程正在(睡眠)等待进入某个临界区,则semsleeping指向所在的队列.
+//显然,现在不需要再等待了,所以把当前进程从这个队列中脱链.
 	if ((q = current->semsleeping)) {
 		int semid = q->id;
 		sma = sem_lock(semid);
@@ -998,7 +1000,8 @@ void sem_exit (void)
 		if(sma!=NULL)
 			sem_unlock(semid);
 	}
-
+//for循环，料理那些正在由当前进程所创建的用户空间信号量上的操作的过程.
+//告诉它们:信号量已经撤销,临界区已经要”清场"并“关门大吉",大家请回吧.
 	for (up = &current->semundo; (u = *up); *up = u->proc_next, kfree(u)) {
 		int semid = u->semid;
 		if(semid == -1)

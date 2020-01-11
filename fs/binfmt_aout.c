@@ -42,6 +42,7 @@ static struct linux_binfmt aout_format = {
 	NULL, THIS_MODULE, load_aout_binary, load_aout_library, aout_core_dump, PAGE_SIZE
 };
 
+//为可执行代码的bss段分配空间并建立起页面映射.
 static void set_brk(unsigned long start, unsigned long end)
 {
 	start = PAGE_ALIGN(start);
@@ -284,7 +285,7 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	    bprm->file->f_dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
 		return -ENOEXEC;
 	}
-
+//各种a.out格式的文件因目标文件的特性不同,其正文的起始位置也就不同.因此,下面的宏根据代码的特性取得正文在目标文件中的起始位置
 	fd_offset = N_TXTOFF(ex);
 
 	/* Check initial limits. This avoids letting people circumvent
@@ -309,6 +310,8 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	if (retval)
 		return retval;
 
+
+//到这里,当前进程已经完成了与过去告别,准备迎接新的使命了.
 	/* OK, This is the point of no return */
 #if !defined(__sparc__)
 	set_personality(PER_LINUX);
@@ -328,6 +331,8 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 	current->mm->rss = 0;
 	current->mm->mmap = NULL;
+
+//确定进程在开始执行新的目标代码以后所具有的权限. 这是根据bprm中的内容和当前的权限确定的.
 	compute_creds(bprm);
  	current->flags &= ~PF_FORKNOEXEC;
 #ifdef __sparc__
@@ -374,6 +379,11 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			 
 		flush_icache_range(text_addr, text_addr+ex.a_text+ex.a_data);
 	} else {
+//在a.out格式的可执行文件中,除OMAGIC以外其它三种均为纯代码;也就是所谓的"可重入"代码.
+//此类代码中,不但其正文段的执行代码在运行时不会改变,其数据段的内容也不会在运行时改变.
+//所以,内核干脆将可执行文件映射到了进程的用户空间中,这样连通常swap所需的盘上空间也省了.
+//在这三种类型的可执行文件中。除NMAGE以外都要求正文段以及数据段的长度与页面大小对齐.
+//如果发现没有对齐就要通过printk发出警告信息.但是,发出警告信息太频繁也不好.所以就设置了一个静态变量erro_time2.
 		static unsigned long error_time, error_time2;
 		if ((ex.a_text & 0xfff || ex.a_data & 0xfff) &&
 		    (N_MAGIC(ex) != NMAGIC) && (jiffies-error_time2) > 5*HZ)
@@ -390,7 +400,10 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			       bprm->file->f_dentry->d_name.name);
 			error_time = jiffies;
 		}
-
+//接下来的操作取决于具体的文件系统是否提供mmap,就是将一个已打开文件映射到虚存空间的操作.
+//以及正文段和数据段的长度是否与页面大小对齐.
+//如果不满足映射的条件,就分配空间并且将正文段和数据段一起读入至进程的用户空间.
+//这次是从文件中位移为fd_offset,即N_TXTOFF(ex)的地方开始,读入到由文件的头部所指定的地址N_TXTADDR(ex),长度为两段的总和.
 		if (!bprm->file->f_op->mmap||((fd_offset & ~PAGE_MASK) != 0)) {
 			loff_t pos = fd_offset;
 			do_brk(N_TXTADDR(ex), ex.a_text+ex.a_data);
@@ -402,6 +415,8 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			goto beyond_if;
 		}
 
+//如果满足映射的条件,那就更好了.那就通过do_mmap分别将文件的正文段和数据段映射到进程的用户空间中,映射的地址则与装入的地址一致.
+//调用mmap之前无需分配空间,那已经包含在mmap之中了.
 		down(&current->mm->mmap_sem);
 		error = do_mmap(bprm->file, N_TXTADDR(ex), ex.a_text,
 			PROT_READ | PROT_EXEC,
@@ -425,11 +440,17 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			return error;
 		}
 	}
+
+//到此,正文段和数据段都已转入就绪了,接下来就是bss段和堆栈段了.
 beyond_if:
+//在fs/exec.c中
 	set_binfmt(&aout_format);
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 
+
+
+//接着,还要在用户空间的堆栈区顶部为进程建立起一个虚存区间,并将执行参数以及环境变量所占的物理页面与此虚存区间建立起映射.
 	retval = setup_arg_pages(bprm); 
 	if (retval < 0) { 
 		/* Someone check-me: is this error path enough? */ 
@@ -437,14 +458,27 @@ beyond_if:
 		return retval;
 	}
 
+//设置完了参数和环境变量后,在这些页面的下方,就是函数调用的用户空间堆栈了.
+//任何程序的入口main,有连个参数argc和argv.其中参数argv[]是字符指针数组,argc则为数组的大小.但是实际上还有个隐藏着的字符指针数组envp[]用来传递环境变量
+//只是不在用户程序的"视野"之内而已. 所以,用户空间堆栈中从一开始就要设置好三项数据.即envp[], argv[], argc.
+//此外,还要将保存着(字符串形式的)参数和环境变量复制到用户空间的顶端.
 	current->mm->start_stack =
 		(unsigned long) create_aout_tables((char *) bprm->p, bprm);
 #ifdef __alpha__
 	regs->gp = ex.a_gpvalue;
 #endif
+
+//到这里,堆栈顶端的argv[]和argc都已经准备好了.
+
+
+//这个是个宏,在include/asm-i385/processor.h中
+//这里regs,指向保留在当前进程内核空间堆栈中的各个寄存器副本,当进程从系统调用返回时,这些数值就会被"恢复"到CPU的各个寄存器中. 所以
+//到时候堆栈指针将是current->mm->start_stack；而返回地址,也就是EIP的内容,则将是ex.a_entry.
 	start_thread(regs, ex.a_entry, current->mm->start_stack);
 	if (current->ptrace & PT_PTRACED)
 		send_sig(SIGTRAP, current, 0);
+//到此,可执行代码的装入和投入运行已经完成.而do_execve在调用了search_binary_handler以后也就结束了.
+//当cpu从系统调用返回到用户空间时,就会从由ex.a_entry确定的地址开始执行.
 	return 0;
 }
 

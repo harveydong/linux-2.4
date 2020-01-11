@@ -205,6 +205,9 @@ struct mm_struct {
 	struct vm_area_struct * mmap_avl;	/* tree of VMAs */
 	struct vm_area_struct * mmap_cache;	/* last find_vma result */
 	pgd_t * pgd;
+
+//这里mm_users随着子进程对用户空间的共享而增减。
+//而mm_count则因为内核中对该mm_struct数据结构的使用而增减
 	atomic_t mm_users;			/* How many users with user space? */
 	atomic_t mm_count;			/* How many references to "struct mm_struct" (users count as 1) */
 	int map_count;				/* number of VMAs */
