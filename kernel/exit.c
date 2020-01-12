@@ -337,6 +337,11 @@ static void exit_notify(void)
 //一个进程在创建之初其生父和养父是一致的,所以两个指针指向同一个父进程.
 //但是,在运行中p_pptr可以暂时地改变.这种改变发生在一个进程通过系统调用ptrace来跟踪另一个进程的时候,这时候被跟踪进程的p_pptr指针被设置成指向正在跟踪它的进程.
 //那个进程就暂时成了被跟踪进程的"养父".
+
+//如果一个进程在其子进程之前"去世"的话,就要把它的子进程托付给某个进程.那托付给谁呢?
+//如果当前进程是一个线程,那就托付给同一线程组中的下一个线程,使子进程的p_opptr指向这个线程.否则,就只好托付给系统中的init进程,所以这init进程就好像是孤儿院.
+//由此可见,所谓"original parent"也不是永远不变的,原因在于系统中的进程号pid以及用作task_struct结构的页面都是在周转使用的.
+
 	forget_original_parent(current);
 	/*
 	 * Check to see if any process groups have become orphaned
