@@ -733,6 +733,11 @@ static void wake_up_parent(struct task_struct *parent)
  * Let a parent know about a status change of a child.
  */
 
+//参数tsk指向当前进程的task_struct结构,只有当进程处于TASK_ZOMBLE(正在exit())或TASK_STOPPED(被跟踪)时才允许调用
+//do_notify_parent.
+//这里的所谓parent是指当前进程的"养父"而不是”生父",也就是由指针p_pptr所指而不是p_opptr所指的进程.
+//在前面的forget_original_parent中已经把每个子进程的p_opptr改成了指向child_reaper.而do_notify_parent中是向p_pptr所指进程发信号;
+//那样,将来当那些子进程要exit时岂不是要向一个已经不存在了的父进程发信号吗? 不要紧,exit_notify的代码中随后就把子进程的p_pptr设置成与p_opptr相同.
 void do_notify_parent(struct task_struct *tsk, int sig)
 {
 	struct siginfo info;

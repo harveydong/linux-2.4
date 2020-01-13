@@ -285,6 +285,10 @@ void put_dirty_page(struct task_struct * tsk, struct page *page, unsigned long a
 /* no need for flush_tlb */
 }
 
+
+//进程的用户空间中地址最高处为堆栈区,这里的常数STACK_TOP就是TASK_SIZE,也就是3GB.
+//堆栈区的顶部为一个数组,数组中的每一个元素都是一个页面.数组的大小为MAX_ARG_PAGES,
+//而实际映射的页面数量则取决于这些执行参数和环境变量的数量.
 int setup_arg_pages(struct linux_binprm *bprm)
 {
 	unsigned long stack_base;
@@ -392,11 +396,14 @@ static int exec_mmap(void)
 	old_mm = current->mm;
 	if (old_mm && atomic_read(&old_mm->mm_users) == 1) {
 		flush_cache_mm(old_mm);
+        //这里只是以防万一.
 		mm_release();
 		exit_mmap(old_mm);
 		flush_tlb_mm(old_mm);
 		return 0;
 	}
+//当这里，就表示子进程的用户空间是通过指针共享而不是复制的,或者根本就没有用户空间,那就不需要调用exit_mmap()释放代表用户空间的那些数据结构了.
+//但是,此时要为子进程分配一个mm_struct数据结构以及页面目录,使得稍后可以在此基础上建立起子进程的用户空间.
 
 	mm = mm_alloc();
 	if (mm) {
@@ -416,13 +423,23 @@ static int exec_mmap(void)
 		current->mm = mm;
 		current->active_mm = mm;
 		task_unlock(current);
+
+//通过下面这个函数切换到这个新的用户空间
+//在include/asm-i386/mmu_context.h
+
+//在这里当前进程的用户空间切换到了新分配mm_struct数据结构所代表的空间了.
+//但是现在新的“用户空间"实际上只是一个框架,一个"空壳",里面一个页面也没有.另一方面,现在是在内核中运行,所以用户空间的切换对目前的运行无影响.
 		activate_mm(active_mm, mm);
+//从此,原来的用户空间就与当前进程无关了.也就是说,当前进程最终放弃了对原来用户空间的共享.这时候执行mm_release将父进程唤醒.
+//对于父进程的用户空间,当然要减少它的共享计数。
 		mm_release();
 		if (old_mm) {
 			if (active_mm != old_mm) BUG();
 			mmput(old_mm);
 			return 0;
 		}
+//这是一个特殊的情况.就是当子进程进入exec_mmap时,其task_struct中的mm_struct指针mm为0,也就是没有用户空间(所以是内核线程).但是,另一个mm_struct结构指针active_mm却不是0,而这时候active_mm是暂借的.在调度其停止运行时,会将该指针设置为0. 
+//也就是说,一个内核线程在受到调度运行时要"借用"在它之前运行的那个进程的active_mm,因而要递增这个mm_struct结构的使用计数,而现在,已经为内核线程分配了它自己的mm_struct结构,使其升格成为了进程,就不再使用借来的active_mm了.所以要调用mmdrop,递减其使用计数.
 		mmdrop(active_mm);
 		return 0;
 	}
@@ -474,6 +491,13 @@ static inline void release_old_signals(struct signal_struct * oldsig)
  * so that a new one can be started
  */
 
+//在进程的tast_struct中的struct files_struct保存中已打开文件的信息.
+//在这个结构中,有个位图close_on_exec,里面存储着表示那些文件在执行一个新目标程序时应予关闭的信息.
+//flush_old_files就是要根据这个位图的指示将这些文件关闭,并且将此位图清成全0.
+
+
+//一般来说,进程的开头三个文件,即fd为0,1,和2(或stdin, stdout以及stderr)的已打开文件是不关闭的;
+//其它的已打开文件则都应该关闭,但是也可以通过ioctl系统调用来加以改变.
 static inline void flush_old_files(struct files_struct * files)
 {
 	long j = -1;
@@ -548,6 +572,7 @@ int flush_old_exec(struct linux_binprm * bprm)
 	if (retval) goto mmap_failed;
 
 	/* This is the point of no return */
+//当前进程原来可能是通过指针共享父进程的信号处理表的,而现在有了自己的独立的信号处理表,所以也要递减父进程信号处理表的共享计数
 	release_old_signals(oldsig);
 
 	current->sas_ss_sp = current->sas_ss_size = 0;
@@ -566,6 +591,8 @@ int flush_old_exec(struct linux_binprm * bprm)
 
 	flush_thread();
 
+//如果"当前进程”原来只是一个线程,那么它的task_struct结构中的thread_group挂入由其父进程为首的"线程组"队列.
+//现在它已经通过execve升级为进程,放弃了对父进程用户空间的共享.所以就要通过de_thread从这个线程组中脱离出来.
 	de_thread(current);
 
 	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid || 
@@ -576,8 +603,15 @@ int flush_old_exec(struct linux_binprm * bprm)
 	   group */
 	   
 	current->self_exec_id++;
-			
+		
+//进程的信号处理表就好像是个中断向量表,但是,这里还有个重要不同,就是信号处理表则还可以有对各种信号预设的(default)响应,并不一定非要指向一个服务程序.
+//当把信号处理表从父进程复制过来时,其中每个表项的值有三种可能:一种可能是SIG_IGN,表示不理睬;第二种是SIG_DFL,表示采取预设的响应方式(例如收到SIGQUIT就exit);
+//第三种就是指向一个用户空间的子程序.
+//但是,现在整个用户空间都已经放弃了,怎么还能让信号处理表项指向用户空间的子程序呢? 所以还得检查一遍,将指向服务程序的表项改成SIG_DFL.这就是由下面的程序完成的.
+//在kernel/signal.c中	
 	flush_signal_handlers(current);
+
+//对原有已打开文件的处理
 	flush_old_files(current->files);
 
 	return 0;
@@ -962,6 +996,7 @@ out:
 void set_binfmt(struct linux_binfmt *new)
 {
 	struct linux_binfmt *old = current->binfmt;
+//如果当前进程原来执行的代码格式与新的代码格式都不是由可安装模块支持,则实际上只剩下一行语句,那就是current->binfmt
 	if (new && new->module)
 		__MOD_INC_USE_COUNT(new->module);
 	current->binfmt = new;

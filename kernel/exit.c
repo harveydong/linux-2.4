@@ -161,6 +161,9 @@ static inline void forget_original_parent(struct task_struct * father)
 	if (reaper == father)
 		reaper = child_reaper;
 
+//搜索所有的task_struct数据结构,凡发现“生父”为当前进程者就将其p_opptr指针改成child_reaper,即init进程.
+//并嘱其将来exit时要发一个SIGCHLD信号给child_reaper,并根据当前进程的task_strut结构中的pdeath_signal的设置来
+//向其发一个信号,告知生父的"噩耗".
 	for_each_task(p) {
 		if (p->p_opptr == father) {
 			/* We dont want people slaying init */
@@ -352,7 +355,16 @@ static void exit_notify(void)
 	 * and we were the only connection outside, so our pgrp
 	 * is about to become orphaned.
 	 */
-	 
+	
+//接下来处理由指针p_pptr所指向的"养父"进程了.这个进程就好像是当前进程的"法定监护人",扮演者更为重要的角色. 
+//一些提示:
+//一个用户login到系统中以后,可能会启动许多不同的进程,所有这些进程都使用同一个控制终端(或用来模拟一个终端的窗口).
+//这些使用同一个控制终端的进程属于同一个session.
+//此外,用户可以在同一个shell命令或执行程序中启动多个进程, 这些进程形成一个"组".
+//每个session或进程组中都有一个为主的、最早创建的进程,这个进程的pid就成为session和进程组的代号。
+//如果当前进程与父进程属于不同的session,不同的组,同时又是其所在的组与其父进程之间唯一的纽带,那么一旦当前进程不存在以后,
+//这整个组就成了"孤儿". 在这样的情况下,按POSIX3.2.2.2的规定要给整个进程组中所有的进程都先发送一个SIGHUP信号,然后再发送一个
+//SIGCONT信号.
 	t = current->p_pptr;
 	
 	if ((t->pgrp != current->pgrp) &&
@@ -400,8 +412,21 @@ static void exit_notify(void)
 //但是当前进程的残骸仍旧占着最低限度的资源.包括其task_struct数据结构和系统空间堆栈所在的连个页面.
 
 	current->state = TASK_ZOMBIE;
+
+//我们知道,exit_notify最主要的目的就是要给父进程发送一个信号,让其知道子进程的生命已经结束而来料理子进程的后事,这是通过do_notify_parent来完成的.
+//在kernel/signal.c中
 	do_notify_parent(current, current->exit_signal);
-	while (current->p_cptr != NULL) {
+
+//进程之间都通过亲缘关系连接在一起而形成“关系网”,所用的指针除p_opptr和p_pptr外,还有:p_cptr,指向子进程;当一个进程有多个子进程时,p_cptr指向其“最年轻的",也就是
+//最近创建的那个子进程.	
+//p_ysptr,指向当前进程的”弟弟",这里的y表示"younger"，而s表示"sibling".
+//p_osptr, 指向当前进程的“哥哥",这里的o表示"older".
+
+//现在是退出这个关系网的时候了.当cpu从do_notify_parent返回到exit_notify中时,所有子进程的p_opptr都已经指向child_reaper,而p_pptr仍指向当前进程.
+//随后的while循环将子进程队列中每个进程都转移到child_reaper的子进程队列中去,并使其p_pptr也指向child_reaper.
+//同时,对每个子进程也要检查其所属的进程组是否成为了"孤岛".
+
+    while (current->p_cptr != NULL) {
 		p = current->p_cptr;
 		current->p_cptr = p->p_osptr;
 		p->p_ysptr = NULL;
@@ -420,6 +445,15 @@ static void exit_notify(void)
 		 * than we are, and it was the only connection
 		 * outside, so the child pgrp is now orphaned.
 		 */
+//如果当前进程是一个session中的主进程(current->leader非0),那就还要将整个session与其主控终端的联系切断,并将该tty释放(注意,进程的task_struct结构中
+//有个指针tty指向其主控终端).
+
+//那么，进程与主控终端的这种联系最初是怎样,以及在什么时候建立的呢?显然,在创建子进程时,将父进程的task_struct 结构复制给子进程的过程中把结构中的tty指针也复制了下来,所以子进程具有与父进程相同的主控终端.
+//但是子进程可以通过ioctl系统调用来改变主控终端,也可以先将当前的主控终端关闭然后再打开一个tty. 不过,在此之前先得通过setsid系统调用来建立一个新的人机
+//交互分组(session),并使得作此调用的进程成为该session的主进程(leader).
+//一个session的主进程与其主控终端断绝关系意味着整个session中的进程都与之断绝了关系,所以要给同一session中的进程发出信号,从此以后,这些进程就没有主控终端,
+//成了"后台进程".
+
 		if ((p->pgrp != current->pgrp) &&
 		    (p->session == current->session)) {
 			int pgrp = p->pgrp;
@@ -494,6 +528,8 @@ fake_volatile:
 //如果恰好有一次中断或者异常在此空隙中发生就会造成问题.所以子进程的task_struct和内核空间堆栈必须要保存到另一个进程开始运行之后才能释放.这样让父进程来料理后事
 //就是一个合理的安排了.
 	exit_notify();
+//在这个,其task_struct结构还是存在的,到父进程收到子进程发来的信号而来料理后事,将子进程的task_struct结构释放之时,子进程就最终从系统中消失了。
+//在这个情景中,父进程正在wait4中等呀.
 	schedule();
 	BUG();
 /*
@@ -525,16 +561,35 @@ asmlinkage long sys_exit(int error_code)
 	do_exit((error_code&0xff)<<8);
 }
 
+
+//参数pid为某一个子进程的进程号
 asmlinkage long sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru)
 {
 	int flag, retval;
+//首先,在当前进程的系统空间堆栈中通过DECLARE_WAITQUEUE分配空间并建立一个wait_queue_t数据结构.
 	DECLARE_WAITQUEUE(wait, current);
 	struct task_struct *tsk;
 
 	if (options & ~(WNOHANG|WUNTRACED|__WNOTHREAD|__WCLONE|__WALL))
 		return -EINVAL;
 
+//通过下面这个函数把数据结构wait加入到当前进程的wait_chldexit队列中.
+//接着进入一个循环,这是一个不小的循环.
+
 	add_wait_queue(&current->wait_chldexit,&wait);
+
+//这个由goto实现的循环要到当前进程被调度运行,并且下列条件之一得到满足时才能结束:
+//1. 所等待的子进程的状态变成TASK_STOPPED或TASK_ZOMBLE.
+//2. 所等待的子进程存在,可是不在上述两个状态,而调用参数options中的WNOHANG标志位为1,或者当前进程收到了其他的信号.
+//3. 进程号为pid的那个进程根本不存在,或者不是当前进程的子进程.
+
+//否则,当前进程将其自身的状态设成TASK_INTERRUPTIBLE并调用schedule进入睡眠让别的进程先运行.
+//当该进程收到信号而被唤醒,并且受到调度从schedule返回时,就又经过goto repeat,转回repeat,再次通过一个for循环扫描其子进程队列.
+//看看所等待的子进程的状态是否满足条件. 这里的for循环扫面一个进程的所有子进程,从最年轻的子进程开始沿着由各个task_struct结构中
+//的指针p_osptr所形成的链扫描,找寻与锁等待对象的pid相符的子进程、或符号其他一些条件的子进程.
+//这个for循环又嵌套在一个do-while循环中,为什么要有这个外层的do-while循环呢？这是因为当前进程可能是一个线程,而所等待的对象实际上是由同一个进程克隆出来的
+//另一个线程的子进程.所以要通过这个do-while循环来检查同一个thread_group中所有线程的子进程.
+
 repeat:
 	flag = 0;
 	current->state = TASK_INTERRUPTIBLE;
@@ -587,6 +642,9 @@ repeat:
 				if (retval)
 					goto end_wait4; 
 				retval = p->pid;
+//这个是特殊的情况需要考虑,那就是万一子进程的p_opptr与p_pptr不同,也就是说其"养父"与"生父"不同. 如前所述,进程在exit时,do_notify_parent的对象是其"养父",
+//但当”生父“与”养父“不同时,其"生父"可能也在等待,所以将子进程的p_pptr指针设置成与p_opptr相同,并通过REMOVE_LINKS将其task_struct从其”养父“的队列中脱离出来.
+//再通过SET_LINKS把它归还给"生父”,重新挂入其“生父”的队列.然后，给其“生父”发一信号，让它自己来处理.
 				if (p->p_opptr != p->p_pptr) {
 					write_lock_irq(&tasklist_lock);
 					REMOVE_LINKS(p);
